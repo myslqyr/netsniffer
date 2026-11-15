@@ -1,0 +1,10 @@
+/build/
+/build-*/
+/.cache/
+/.idea/
+/.vscode/
+*.user
+*.pcap
+*.pcapng
+!/tests/fixtures/*.pcap
+!/tests/fixtures/*.pcapng

@@ -16,17 +16,28 @@ set_target_properties(netsniffer-capture PROPERTIES AUTOMOC OFF)
 target_link_libraries(netsniffer-capture PRIVATE PkgConfig::PCAP)
 target_compile_options(netsniffer-capture PRIVATE -Wall -Wextra -Wpedantic)
 
+add_library(packet_parser STATIC src/parser/packetparser.cpp)
+set_target_properties(packet_parser PROPERTIES AUTOMOC OFF)
+target_link_libraries(packet_parser PUBLIC Qt6::Core PRIVATE PkgConfig::PCAP)
+target_include_directories(packet_parser PUBLIC src)
+target_compile_options(packet_parser PRIVATE -Wall -Wextra -Wpedantic)
+
 add_executable(netsniffer
     src/main.cpp
     src/capture/device.cpp
     src/capture/captureworker.cpp
     src/ui/mainwindow.cpp
 )
-target_link_libraries(netsniffer PRIVATE Qt6::Widgets PkgConfig::PCAP)
+target_link_libraries(netsniffer PRIVATE Qt6::Widgets PkgConfig::PCAP packet_parser)
 target_compile_options(netsniffer PRIVATE -Wall -Wextra -Wpedantic)
 
 include(CTest)
 if(BUILD_TESTING)
+    add_executable(parser_check tests/parser_check.cpp)
+    set_target_properties(parser_check PROPERTIES AUTOMOC OFF)
+    target_link_libraries(parser_check PRIVATE packet_parser)
+    target_compile_options(parser_check PRIVATE -Wall -Wextra -Wpedantic)
+    add_test(NAME packet_parser COMMAND parser_check)
     add_executable(fake_capture_helper tests/fake_capture_helper.cpp)
     set_target_properties(fake_capture_helper PROPERTIES AUTOMOC OFF)
     target_include_directories(fake_capture_helper PRIVATE src)
@@ -39,7 +50,7 @@ if(BUILD_TESTING)
     set_tests_properties(capture_ipc PROPERTIES TIMEOUT 30)
     add_executable(capture_ui_check tests/capture_ui_check.cpp
         src/ui/mainwindow.cpp src/capture/captureworker.cpp)
-    target_link_libraries(capture_ui_check PRIVATE Qt6::Widgets)
+    target_link_libraries(capture_ui_check PRIVATE Qt6::Widgets packet_parser)
     target_include_directories(capture_ui_check PRIVATE src)
     target_compile_options(capture_ui_check PRIVATE -Wall -Wextra -Wpedantic)
     add_test(NAME capture_ui COMMAND capture_ui_check $<TARGET_FILE:fake_capture_helper>)

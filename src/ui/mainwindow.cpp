@@ -1,5 +1,6 @@
 #include "mainwindow.h"
 #include "../capture/captureworker.h"
+#include "../parser/packetparser.h"
 
 #include <QCloseEvent>
 #include <QComboBox>
@@ -39,14 +40,30 @@ MainWindow::MainWindow(QString helperPath) : helperPath_(std::move(helperPath))
     details_->setTextInteractionFlags(Qt::TextSelectableByMouse);
     details_->setWordWrap(true);
     layout->addWidget(details_);
-    table_ = new QTableWidget(0, 4, central);
+    table_ = new QTableWidget(0, 8, central);
     table_->setHorizontalHeaderLabels({QStringLiteral("序号"), QStringLiteral("捕获时间"),
-                                      QStringLiteral("捕获长度（字节）"), QStringLiteral("原始长度（字节）")});
-    table_->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
+                                      QStringLiteral("源地址"), QStringLiteral("目的地址"),
+                                      QStringLiteral("协议"), QStringLiteral("捕获长度"),
+                                      QStringLiteral("原始长度"), QStringLiteral("摘要")});
+    table_->horizontalHeader()->setStretchLastSection(true);
+    const int widths[] = {65, 145, 210, 210, 85, 85, 85, 400};
+    for (int column = 0; column < 8; ++column) table_->setColumnWidth(column, widths[column]);
+    table_->setWordWrap(false);
     table_->setEditTriggers(QAbstractItemView::NoEditTriggers);
     table_->setSelectionBehavior(QAbstractItemView::SelectRows);
     table_->verticalHeader()->hide();
     layout->addWidget(table_, 1);
+    auto* summary = new QLabel(central);
+    summary->setObjectName(QStringLiteral("packetSummary"));
+    summary->setTextFormat(Qt::PlainText);
+    summary->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    summary->setWordWrap(true);
+    layout->addWidget(summary);
+    connect(table_, &QTableWidget::itemSelectionChanged, this, [this, summary] {
+        const auto selected = table_->selectedItems();
+        const auto* item = selected.isEmpty() ? nullptr : table_->item(selected.first()->row(), 7);
+        summary->setText(item ? item->text() : QString());
+    });
     setCentralWidget(central);
 
     timer_ = new QTimer(this);
@@ -163,11 +180,17 @@ void MainWindow::drainPackets()
         const auto time = QDateTime::fromMSecsSinceEpoch(packet.timestampUs / 1000)
             .toString(QStringLiteral("HH:mm:ss"))
             + QStringLiteral(".%1").arg(packet.timestampUs % 1000000, 6, 10, QLatin1Char('0'));
+        const auto parsed = parsePacket(packet);
         const QStringList values{QString::number(++packetCount_), time,
+                                 parsed.source.isEmpty() ? QStringLiteral("—") : parsed.source,
+                                 parsed.destination.isEmpty() ? QStringLiteral("—") : parsed.destination,
+                                 parsed.protocol,
                                  QString::number(packet.capturedLength),
-                                 QString::number(packet.originalLength)};
+                                 QString::number(packet.originalLength), parsed.summary};
         for (int column = 0; column < values.size(); ++column) {
-            table_->setItem(row, column, new QTableWidgetItem(values[column]));
+            auto* item = new QTableWidgetItem(values[column]);
+            item->setToolTip(values[column]);
+            table_->setItem(row, column, item);
         }
     }
     table_->setUpdatesEnabled(true);

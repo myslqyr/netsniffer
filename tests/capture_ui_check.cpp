@@ -4,6 +4,7 @@
 #include <QComboBox>
 #include <QElapsedTimer>
 #include <QEventLoop>
+#include <QLabel>
 #include <QPushButton>
 #include <QStatusBar>
 #include <QTableWidget>
@@ -75,6 +76,21 @@ int main(int argc, char** argv)
         || !window.statusBar()->currentMessage().contains(QStringLiteral("test permission denied"))) {
         return 1;
     }
+    selector->setItemData(0, QStringLiteral("parsed"));
+    start->click();
+    if (!waitUntil([&] { return table->rowCount() == 1; })
+        || table->columnCount() != 8 || table->item(0, 2)->text() != QStringLiteral("1.2.3.4")
+        || table->item(0, 3)->text() != QStringLiteral("5.6.7.8")
+        || table->item(0, 4)->text() != QStringLiteral("TCP")
+        || table->item(0, 5)->text() != QStringLiteral("54")
+        || !table->item(0, 7)->text().contains(QStringLiteral("源端口 12345 → 目的端口 80；发起连接 [SYN]"))) {
+        return 1;
+    }
+    table->selectRow(0);
+    const auto* summary = window.findChild<QLabel*>(QStringLiteral("packetSummary"));
+    if (!summary || summary->text() != table->item(0, 7)->text()) return 1;
+    stop->click();
+    if (!waitUntil([&] { return start->isEnabled(); })) return 1;
     selector->setItemData(0, QStringLiteral("fragmented"));
     start->click();
     if (!waitUntil([&] { return table->rowCount() == 1; })) {

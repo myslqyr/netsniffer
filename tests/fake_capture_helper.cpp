@@ -75,11 +75,27 @@ int main(int argc, char** argv)
     if (mode != "idle") {
         const int count = mode == "flood" ? 2100 : 1;
         for (int index = 0; index < count; ++index) {
+            std::vector<unsigned char> data{'t', 'e', 's', 't'};
+            if (mode == "parsed") {
+                data.assign(54, 0);
+                data[12] = 0x08;
+                data[14] = 0x45;
+                data[17] = 40;
+                data[22] = 64;
+                data[23] = 6;
+                for (int byte = 0; byte < 8; ++byte) data[26 + byte] = byte + 1;
+                data[34] = 0x30;
+                data[35] = 0x39;
+                data[37] = 80;
+                data[41] = 1;
+                data[46] = 0x50;
+                data[47] = 0x02;
+            }
             std::vector<unsigned char> payload;
             CaptureProtocol::append64(payload, 1700000000123456);
-            CaptureProtocol::append32(payload, mode == "invalid-length" ? 5 : 4);
-            CaptureProtocol::append32(payload, 8);
-            payload.insert(payload.end(), {'t', 'e', 's', 't'});
+            CaptureProtocol::append32(payload, mode == "invalid-length" ? 5 : data.size());
+            CaptureProtocol::append32(payload, mode == "parsed" ? data.size() : 8);
+            payload.insert(payload.end(), data.begin(), data.end());
             if (!sendBytes(CaptureProtocol::frame(CaptureProtocol::Type::Packet, payload),
                            mode == "fragmented")) {
                 return 0;

@@ -1,17 +1,9 @@
 #pragma once
 
-#include <QByteArray>
+#include "../packet/packet.h"
 #include <QMutex>
 #include <QThread>
 #include <QVector>
-
-struct CapturedPacket {
-    qint64 timestampUs;
-    quint32 capturedLength;
-    quint32 originalLength;
-    int linkType;
-    QByteArray bytes;
-};
 
 class CaptureWorker : public QThread {
     Q_OBJECT

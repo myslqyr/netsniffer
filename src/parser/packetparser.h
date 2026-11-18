@@ -4,9 +4,18 @@
 
 #include <QString>
 #include <QStringList>
+#include <QVector>
 #include <optional>
 
 enum class ParseStatus { Complete, Unsupported, Truncated, Malformed };
+
+struct ProtocolField {
+    QString name;
+    QString value;
+    qsizetype offset = -1;
+    qsizetype length = 0;
+    QVector<ProtocolField> children;
+};
 
 struct ParsedPacket {
     QString source;
@@ -20,6 +29,7 @@ struct ParsedPacket {
     QString summary;
     ParseStatus status = ParseStatus::Complete;
     bool fragmented = false;
+    QVector<ProtocolField> fields;
 };
 
-ParsedPacket parsePacket(const CapturedPacket& packet);
+ParsedPacket parsePacket(const CapturedPacket& packet, bool includeDetails = false);

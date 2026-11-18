@@ -1,6 +1,7 @@
 #include "mainwindow.h"
 #include "../capture/captureworker.h"
 #include "../parser/packetparser.h"
+#include "packetbytesview.h"
 
 #include <QCloseEvent>
 #include <QComboBox>
@@ -10,6 +11,9 @@
 #include <QLabel>
 #include <QPushButton>
 #include <QStatusBar>
+#include <QSignalBlocker>
+#include <QSplitter>
+#include <QTreeWidget>
 #include <QVBoxLayout>
 #include <QTableWidget>
 #include <QTimer>
@@ -18,7 +22,7 @@
 MainWindow::MainWindow(QString helperPath) : helperPath_(std::move(helperPath))
 {
     setWindowTitle(QStringLiteral("网络嗅探器 · 实验 1A"));
-    resize(1100, 720);
+    resize(1280, 900);
 
     auto* central = new QWidget(this);
     auto* layout = new QVBoxLayout(central);
@@ -40,6 +44,11 @@ MainWindow::MainWindow(QString helperPath) : helperPath_(std::move(helperPath))
     details_->setTextInteractionFlags(Qt::TextSelectableByMouse);
     details_->setWordWrap(true);
     layout->addWidget(details_);
+    auto* panes = new QSplitter(Qt::Vertical, central);
+    panes->setChildrenCollapsible(false);
+    auto* listPane = new QWidget(panes);
+    auto* listLayout = new QVBoxLayout(listPane);
+    listLayout->setContentsMargins(0, 0, 0, 0);
     table_ = new QTableWidget(0, 8, central);
     table_->setHorizontalHeaderLabels({QStringLiteral("序号"), QStringLiteral("捕获时间"),
                                       QStringLiteral("源地址"), QStringLiteral("目的地址"),
@@ -51,18 +60,33 @@ MainWindow::MainWindow(QString helperPath) : helperPath_(std::move(helperPath))
     table_->setWordWrap(false);
     table_->setEditTriggers(QAbstractItemView::NoEditTriggers);
     table_->setSelectionBehavior(QAbstractItemView::SelectRows);
+    table_->setSelectionMode(QAbstractItemView::SingleSelection);
     table_->verticalHeader()->hide();
-    layout->addWidget(table_, 1);
-    auto* summary = new QLabel(central);
-    summary->setObjectName(QStringLiteral("packetSummary"));
-    summary->setTextFormat(Qt::PlainText);
-    summary->setTextInteractionFlags(Qt::TextSelectableByMouse);
-    summary->setWordWrap(true);
-    layout->addWidget(summary);
-    connect(table_, &QTableWidget::itemSelectionChanged, this, [this, summary] {
-        const auto selected = table_->selectedItems();
-        const auto* item = selected.isEmpty() ? nullptr : table_->item(selected.first()->row(), 7);
-        summary->setText(item ? item->text() : QString());
+    table_->setMinimumHeight(100);
+    listLayout->addWidget(table_, 1);
+    summary_ = new QLabel(listPane);
+    summary_->setObjectName(QStringLiteral("packetSummary"));
+    summary_->setTextFormat(Qt::PlainText);
+    summary_->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    summary_->setWordWrap(true);
+    listLayout->addWidget(summary_);
+    protocolTree_ = new QTreeWidget(panes);
+    protocolTree_->setObjectName(QStringLiteral("protocolDetails"));
+    protocolTree_->setHeaderLabels({QStringLiteral("协议 / 字段"), QStringLiteral("值")});
+    protocolTree_->setColumnWidth(0, 300);
+    protocolTree_->setMinimumHeight(90);
+    bytesView_ = new PacketBytesView(panes);
+    bytesView_->setMinimumHeight(90);
+    panes->setSizes({300, 220, 180});
+    panes->setStretchFactor(0, 3);
+    panes->setStretchFactor(1, 2);
+    panes->setStretchFactor(2, 2);
+    layout->addWidget(panes, 1);
+    connect(table_, &QTableWidget::itemSelectionChanged, this, &MainWindow::showSelectedPacket);
+    connect(protocolTree_, &QTreeWidget::currentItemChanged, this, [this](QTreeWidgetItem* item) {
+        bytesView_->highlightBytes(item && item->data(0, Qt::UserRole).isValid()
+                                       ? item->data(0, Qt::UserRole).toLongLong() : -1,
+                                   item ? item->data(0, Qt::UserRole + 1).toLongLong() : 0);
     });
     setCentralWidget(central);
 
@@ -113,6 +137,10 @@ void MainWindow::startCapture()
         return;
     }
     table_->setRowCount(0);
+    packets_.clear();
+    packetOrder_.clear();
+    storedBytes_ = 0;
+    clearPacketDetails();
     packetCount_ = 0;
     captureError_.clear();
     worker_ = new CaptureWorker(deviceSelector_->currentData().toString(), this, helperPath_);
@@ -167,13 +195,13 @@ void MainWindow::drainPackets()
         return;
     }
     const auto packets = worker_->takePackets();
+    const QSignalBlocker selectionBlocker(table_);
     table_->setUpdatesEnabled(false);
-    // Bound the number of visible rows independently of the capture queue.
+    const bool sorting = table_->isSortingEnabled();
+    table_->setSortingEnabled(false);
+    // IDs stay stable when rows move; retain at most 2000 packets / 64 MiB of bytes.
     constexpr int maxRows = 2000;
-    const int excess = qMax(0, table_->rowCount() + int(packets.size()) - maxRows);
-    for (int i = 0; i < excess; ++i) {
-        table_->removeRow(0);
-    }
+    constexpr qsizetype maxBytes = 64 * 1024 * 1024;
     for (const auto& packet : packets) {
         const int row = table_->rowCount();
         table_->insertRow(row);
@@ -192,12 +220,73 @@ void MainWindow::drainPackets()
             item->setToolTip(values[column]);
             table_->setItem(row, column, item);
         }
+        auto* rowItem = table_->item(row, 0);
+        rowItem->setData(Qt::UserRole, QVariant::fromValue(packetCount_));
+        packets_.insert(packetCount_, {packet, rowItem});
+        packetOrder_.push_back(packetCount_);
+        storedBytes_ += packet.bytes.size();
+        while (packetOrder_.size() > maxRows || storedBytes_ > maxBytes) {
+            const auto id = packetOrder_.front();
+            packetOrder_.pop_front();
+            const auto oldest = packets_.find(id);
+            storedBytes_ -= oldest->packet.bytes.size();
+            table_->removeRow(table_->row(oldest->rowItem));
+            packets_.erase(oldest);
+        }
     }
+    if (selectedPacketId_ != 0 && !packets_.contains(selectedPacketId_)) {
+        table_->clearSelection();
+        table_->setCurrentCell(-1, -1);
+    }
+    table_->setSortingEnabled(sorting);
     table_->setUpdatesEnabled(true);
+    // Signals were blocked during insertion/eviction. Refresh once from stable IDs.
+    showSelectedPacket();
     if (captureError_.isEmpty() && stop_->isEnabled()) {
         statusBar()->showMessage(QStringLiteral("正在抓包 · 接收 %1 · 队列丢弃 %2 · 显示 %3")
             .arg(packetCount_).arg(worker_->droppedPackets()).arg(table_->rowCount()));
     }
+}
+
+void MainWindow::clearPacketDetails()
+{
+    selectedPacketId_ = 0;
+    protocolTree_->clear();
+    bytesView_->setBytes({});
+    summary_->clear();
+}
+
+void MainWindow::showSelectedPacket()
+{
+    const auto selection = table_->selectedItems();
+    const auto* item = selection.isEmpty() ? nullptr : table_->item(selection.first()->row(), 0);
+    const auto id = item ? item->data(Qt::UserRole).toULongLong() : 0;
+    const auto stored = packets_.constFind(id);
+    if (stored == packets_.cend()) {
+        clearPacketDetails();
+        return;
+    }
+    if (selectedPacketId_ == id) return;
+    selectedPacketId_ = id;
+    const auto parsed = parsePacket(stored->packet, true);
+    summary_->setText(parsed.summary);
+    const QSignalBlocker blocker(protocolTree_);
+    protocolTree_->clear();
+    bytesView_->setBytes(stored->packet.bytes);
+    const auto addField = [&](const auto& self, const ProtocolField& field, QTreeWidgetItem* parent) -> void {
+        auto* node = parent ? new QTreeWidgetItem(parent) : new QTreeWidgetItem(protocolTree_);
+        node->setText(0, field.name);
+        node->setText(1, field.value);
+        node->setToolTip(1, field.value);
+        if (field.offset >= 0 && field.length > 0) {
+            node->setData(0, Qt::UserRole, qlonglong(field.offset));
+            node->setData(0, Qt::UserRole + 1, qlonglong(field.length));
+        }
+        for (const auto& child : field.children) self(self, child, node);
+    };
+    for (const auto& field : parsed.fields) addField(addField, field, nullptr);
+    protocolTree_->expandAll();
+    protocolTree_->setCurrentItem(nullptr);
 }
 
 void MainWindow::closeEvent(QCloseEvent* event)

@@ -27,6 +27,7 @@ add_executable(netsniffer
     src/capture/device.cpp
     src/capture/captureworker.cpp
     src/ui/mainwindow.cpp
+    src/ui/packetbytesview.cpp
 )
 target_link_libraries(netsniffer PRIVATE Qt6::Widgets PkgConfig::PCAP packet_parser)
 target_compile_options(netsniffer PRIVATE -Wall -Wextra -Wpedantic)
@@ -49,12 +50,19 @@ if(BUILD_TESTING)
     add_test(NAME capture_ipc COMMAND capture_ipc_check $<TARGET_FILE:fake_capture_helper>)
     set_tests_properties(capture_ipc PROPERTIES TIMEOUT 30)
     add_executable(capture_ui_check tests/capture_ui_check.cpp
-        src/ui/mainwindow.cpp src/capture/captureworker.cpp)
+        src/ui/mainwindow.cpp src/ui/packetbytesview.cpp src/capture/captureworker.cpp)
     target_link_libraries(capture_ui_check PRIVATE Qt6::Widgets packet_parser)
     target_include_directories(capture_ui_check PRIVATE src)
     target_compile_options(capture_ui_check PRIVATE -Wall -Wextra -Wpedantic)
     add_test(NAME capture_ui COMMAND capture_ui_check $<TARGET_FILE:fake_capture_helper>)
     set_tests_properties(capture_ui PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 30)
+    add_executable(packet_details_check tests/packet_details_check.cpp
+        src/ui/mainwindow.cpp src/ui/packetbytesview.cpp src/capture/captureworker.cpp)
+    target_link_libraries(packet_details_check PRIVATE Qt6::Widgets packet_parser)
+    target_include_directories(packet_details_check PRIVATE src)
+    target_compile_options(packet_details_check PRIVATE -Wall -Wextra -Wpedantic)
+    add_test(NAME packet_details COMMAND packet_details_check $<TARGET_FILE:fake_capture_helper>)
+    set_tests_properties(packet_details PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 45)
     add_executable(capture_check tests/capture_check.cpp src/capture/captureworker.cpp)
     target_link_libraries(capture_check PRIVATE Qt6::Core)
     target_include_directories(capture_check PRIVATE src)

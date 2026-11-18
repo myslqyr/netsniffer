@@ -51,7 +51,34 @@ QByteArray ipv6(const QByteArray& payload, int protocol)
 ParsedPacket parse(const QByteArray& bytes, int link = DLT_RAW, int originalLength = -1)
 {
     return parsePacket({0, quint32(bytes.size()),
-        quint32(originalLength < 0 ? bytes.size() : originalLength), link, bytes});
+        quint32(originalLength < 0 ? bytes.size() : originalLength), link, bytes}, true);
+}
+
+const ProtocolField* findField(const ParsedPacket& packet, const QString& group, const QString& name)
+{
+    for (const auto& parent : packet.fields) {
+        if (parent.name != group) continue;
+        for (const auto& child : parent.children) if (child.name == name) return &child;
+    }
+    return nullptr;
+}
+
+bool rangeIs(const ParsedPacket& packet, const QString& group, const QString& name,
+             qsizetype offset, qsizetype length, const QString& value = {})
+{
+    const auto* field = findField(packet, group, name);
+    return field && field->offset == offset && field->length == length
+        && (value.isEmpty() || field->value == value);
+}
+
+bool validRanges(const QVector<ProtocolField>& fields, qsizetype capturedSize)
+{
+    for (const auto& field : fields) {
+        if (field.offset >= 0 && (field.offset > capturedSize || field.length < 0
+                                  || field.length > capturedSize - field.offset)) return false;
+        if (!validRanges(field.children, capturedSize)) return false;
+    }
+    return true;
 }
 }
 
@@ -68,12 +95,21 @@ int main()
         && result.sourceMac == "66:77:88:99:aa:bb" && result.destinationMac == "00:11:22:33:44:55"
         && result.protocols == QStringList({"Ethernet", "IPv4", "TCP"})
         && result.summary.contains("SYN") && result.summary.contains("序列号 1"), "Ethernet IPv4 TCP SYN");
+    check(rangeIs(result, "Ethernet II", "源 MAC 地址", 6, 6, "66:77:88:99:aa:bb")
+        && rangeIs(result, "IPv4", "源 IP 地址", 26, 4, "1.2.3.4")
+        && rangeIs(result, "TCP", "源端口", 34, 2, "12345")
+        && rangeIs(result, "TCP", "标志位（低 8 位）", 47, 1), "Ethernet/IP/TCP byte ranges");
+    check(parsePacket({0, quint32(ethernet.size()), quint32(ethernet.size()), DLT_EN10MB, ethernet}).fields.isEmpty(),
+          "list parsing does not retain detail trees");
 
     auto tcpOptions = tcp;
     tcpOptions[12] = 0x60;
     tcpOptions.append(4, '\0');
     result = parse(ipv4(tcpOptions, 6, 24));
     check(result.status == ParseStatus::Complete && result.summary.contains("载荷 0 字节"), "variable IP and TCP headers");
+    check(rangeIs(result, "IPv4", "IP 选项", 20, 4)
+        && rangeIs(result, "TCP", "源端口", 24, 2)
+        && rangeIs(result, "TCP", "TCP 选项", 44, 4), "variable header byte ranges");
     auto badTcp = tcp;
     badTcp[12] = 0x40;
     check(parse(ipv4(badTcp, 6)).status == ParseStatus::Malformed, "TCP invalid data offset");
@@ -115,7 +151,13 @@ int main()
     result = parse(ipv4(mdns, 17));
     check(result.protocol == "UDP" && result.summary.contains("源端口 1234 → 目的端口 5353")
         && result.summary.contains("载荷 360 字节") && result.summary.contains("UDP 报文 368 字节")
-        && result.summary.contains("内容未验证"), "readable UDP summary and cautious port hint");
+        && !result.summary.contains("mDNS") && !result.summary.contains("未验证"), "UDP summary contains factual packet fields only");
+    result = parse(ipv4(QByteArray::fromHex("1600000000000000"), 2));
+    check(result.protocol == "IGMP" && result.summary == QStringLiteral("IGMP；载荷 8 字节")
+        && result.status == ParseStatus::Unsupported, "IGMP protocol identity without implementation commentary");
+    result = parse(ipv4(udp, 253));
+    check(result.summary == QStringLiteral("IP 协议 253；载荷 8 字节")
+        && !result.summary.contains("暂不支持"), "unknown IP protocol retains numeric identity");
     auto ack = tcp;
     ack[13] = 0x10;
     check(parse(ipv4(ack, 6)).summary.contains("确认应答 [ACK]"), "TCP ACK intent");
@@ -136,6 +178,8 @@ int main()
     check(result.status == ParseStatus::Complete && result.protocol == "UDP"
         && result.source == "2001:db8::1" && result.destination == "2001:db8::2"
         && result.protocols.contains("IPv6"), "IPv6 UDP");
+    check(rangeIs(result, "IPv6", "源 IP 地址", 8, 16, "2001:db8::1")
+        && rangeIs(result, "UDP", "目的端口", 42, 2, "53"), "IPv6 byte ranges");
     result = parse(ipv6(QByteArray::fromHex("8100000012340001"), 58));
     check(result.protocol == "ICMPv6" && result.summary.contains("Ping 回复"), "ICMPv6 echo reply");
     check(parse(ipv6(tcp, 6)).protocol == "TCP", "IPv6 TCP");
@@ -144,6 +188,8 @@ int main()
     auto extension = QByteArray::fromHex("1100000000000000");
     result = parse(ipv6(extension + udp, 0));
     check(result.status == ParseStatus::Complete && result.destinationPort == 53, "IPv6 hop-by-hop traversal");
+    check(rangeIs(result, "IPv6 扩展头：逐跳选项", "下一头部", 40, 1, "17")
+        && rangeIs(result, "UDP", "源端口", 48, 2), "IPv6 extension byte ranges");
     extension[1] = 2;
     check(parse(ipv6(extension + udp, 0)).status == ParseStatus::Malformed, "IPv6 extension exceeds declared length");
     auto fragment6 = QByteArray::fromHex("1100000900000001");
@@ -161,12 +207,17 @@ int main()
     vlan.replace(12, 2, QByteArray::fromHex("8100002a0800"));
     result = parse(vlan, DLT_EN10MB);
     check(result.protocol == "TCP" && result.summary.contains("VLAN 42"), "VLAN Ethernet");
+    check(rangeIs(result, "802.1Q VLAN", "VLAN ID", 14, 2, "42")
+        && rangeIs(result, "IPv4", "源 IP 地址", 30, 4), "VLAN byte ranges");
     QByteArray sll(16, '\0');
     put16(sll, 14, 0x0800);
     check(parse(sll + tcp4, DLT_LINUX_SLL).sourcePort == 12345, "Linux SLL");
     QByteArray sll2(20, '\0');
     put16(sll2, 0, 0x86dd);
-    check(parse(sll2 + ipv6(udp, 17), DLT_LINUX_SLL2).destinationPort == 53, "Linux SLL2 any device");
+    result = parse(sll2 + ipv6(udp, 17), DLT_LINUX_SLL2);
+    check(result.destinationPort == 53, "Linux SLL2 any device");
+    check(rangeIs(result, "Linux SLL2", "协议类型", 0, 2, "0x86dd")
+        && rangeIs(result, "IPv6", "源 IP 地址", 28, 16), "SLL2 byte ranges");
     quint32 family = AF_INET;
     QByteArray nullHeader(reinterpret_cast<const char*>(&family), sizeof(family));
     check(parse(nullHeader + tcp4, DLT_NULL).sourcePort == 12345, "native loopback header");
@@ -180,6 +231,8 @@ int main()
     check(result.status == ParseStatus::Complete && result.protocol == "ARP"
         && result.source == "1.2.3.4" && result.destination == "5.6.7.8"
         && result.summary.contains("查询 5.6.7.8 的 MAC 地址"), "ARP request");
+    check(rangeIs(result, "ARP", "发送方 IP 地址", 28, 4, "1.2.3.4")
+        && rangeIs(result, "ARP", "目标 IP 地址", 38, 4, "5.6.7.8"), "ARP byte ranges");
     auto arpReply = arp;
     put16(arpReply, 20, 2);
     check(parse(arpReply, DLT_EN10MB).summary.contains("MAC 地址为 66:77:88:99:aa:bb"), "ARP reply");
@@ -196,7 +249,7 @@ int main()
     for (int sample = 0; sample < 4000; ++sample) {
         QByteArray bytes(random.bounded(128), '\0');
         for (auto& byte : bytes) byte = char(random.generate());
-        parse(bytes, links[sample % 8]);
+        check(validRanges(parse(bytes, links[sample % 8]).fields, bytes.size()), "random input detail bounds");
     }
     QTextStream(stdout) << "checks=" << checks << " failures=" << failures << " random_inputs=4000\n";
     return failures == 0 ? 0 : 1;

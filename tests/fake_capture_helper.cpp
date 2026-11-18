@@ -73,11 +73,17 @@ int main(int argc, char** argv)
         return 0;
     }
     if (mode != "idle") {
-        const int count = mode == "flood" ? 2100 : 1;
+        const bool detailStream = mode == "detail-stream";
+        const bool detailBudget = mode == "detail-budget";
+        const int count = mode == "flood" ? 2100 : detailStream ? 2102 : detailBudget ? 1050 : 1;
         for (int index = 0; index < count; ++index) {
+            if ((detailStream || detailBudget) && (index == 2 || (index > 2 && index % 100 == 0))) {
+                pollfd input{STDIN_FILENO, POLLIN, 0};
+                if (poll(&input, 1, index == 2 ? 400 : 80) > 0) return 0;
+            }
             std::vector<unsigned char> data{'t', 'e', 's', 't'};
-            if (mode == "parsed") {
-                data.assign(54, 0);
+            if (mode == "parsed" || detailStream || detailBudget) {
+                data.assign(detailBudget ? 65535 : 54, 0);
                 data[12] = 0x08;
                 data[14] = 0x45;
                 data[17] = 40;
@@ -90,11 +96,31 @@ int main(int argc, char** argv)
                 data[41] = 1;
                 data[46] = 0x50;
                 data[47] = 0x02;
+                if (detailStream || detailBudget) {
+                    data[41] = static_cast<unsigned char>(index);
+                }
+                if (detailStream && index == 1) {
+                    data.resize(46);
+                    data[17] = 32;
+                    data[23] = 17;
+                    data[26] = 9;
+                    data[35] = 0x3a;
+                    data[36] = 0x14;
+                    data[37] = 0xe9;
+                    data[38] = 0;
+                    data[39] = 12;
+                    data[40] = 0;
+                    data[41] = 0;
+                    data[42] = 'A';
+                    data[43] = '\n';
+                    data[44] = 0;
+                    data[45] = 'Z';
+                }
             }
             std::vector<unsigned char> payload;
             CaptureProtocol::append64(payload, 1700000000123456);
             CaptureProtocol::append32(payload, mode == "invalid-length" ? 5 : data.size());
-            CaptureProtocol::append32(payload, mode == "parsed" ? data.size() : 8);
+            CaptureProtocol::append32(payload, mode == "parsed" || detailStream || detailBudget ? data.size() : 8);
             payload.insert(payload.end(), data.begin(), data.end());
             if (!sendBytes(CaptureProtocol::frame(CaptureProtocol::Type::Packet, payload),
                            mode == "fragmented")) {

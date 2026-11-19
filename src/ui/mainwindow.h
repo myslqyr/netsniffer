@@ -2,6 +2,7 @@
 
 #include "../capture/device.h"
 #include "../packet/packet.h"
+#include "../filter/displayfilter.h"
 
 #include <QHash>
 #include <QMainWindow>
@@ -17,6 +18,7 @@ class CaptureWorker;
 class QTreeWidget;
 class QTableWidgetItem;
 class PacketBytesView;
+class QLineEdit;
 
 class MainWindow : public QMainWindow {
 public:
@@ -30,6 +32,9 @@ private:
     void drainPackets();
     void showSelectedPacket();
     void clearPacketDetails();
+    void applyDisplayFilter();
+    void refreshDisplayFilter();
+    void updateCaptureStatus();
     void closeEvent(QCloseEvent* event) override;
 
     QVector<CaptureDevice> devices_;
@@ -51,9 +56,20 @@ private:
     struct StoredPacket {
         CapturedPacket packet;
         QTableWidgetItem* rowItem;
+        ParsedPacket parsed;
     };
     QHash<quint64, StoredPacket> packets_;
     std::deque<quint64> packetOrder_;
     qsizetype storedBytes_ = 0;
     quint64 selectedPacketId_ = 0;
+    QComboBox* protocolFilter_;
+    QLineEdit* addressFilter_;
+    QLineEdit* portFilter_;
+    QLineEdit* captureFilter_;
+    QLabel* filterError_;
+    DisplayFilter displayFilter_;
+    int visiblePacketCount_ = 0;
+    quint64 lastDroppedPackets_ = 0;
+    bool updatingPackets_ = false;
+    bool captureReady_ = false;
 };

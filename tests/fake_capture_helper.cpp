@@ -1,8 +1,10 @@
 #include "capture/protocol.h"
+#include "capture/capturefilter.h"
 
 #include <cerrno>
 #include <csignal>
 #include <cstring>
+#include <memory>
 #include <poll.h>
 #include <string>
 #include <unistd.h>
@@ -29,11 +31,24 @@ static bool sendBytes(const std::vector<unsigned char>& bytes, bool fragmented =
 
 int main(int argc, char** argv)
 {
-    if (argc != 3 || std::strcmp(argv[1], "--interface") != 0) {
+    if ((argc != 3 && argc != 5) || std::strcmp(argv[1], "--interface") != 0
+        || (argc == 5 && std::strcmp(argv[3], "--filter") != 0)) {
         return 2;
     }
     std::signal(SIGPIPE, SIG_IGN);
     const std::string mode(argv[2]);
+    if (mode == "legacy-filter" && argc == 5) return 2;
+    std::unique_ptr<pcap_t, decltype(&pcap_close)> dead(
+        pcap_open_dead(DLT_EN10MB, CaptureProtocol::snapLength), &pcap_close);
+    CaptureFilter filter;
+    if (argc == 5) {
+        std::string error;
+        if (!dead || !filter.compile(dead.get(), argv[4], error)) {
+            const auto message = std::string("捕获过滤条件错误：") + error;
+            sendBytes(CaptureProtocol::frame(CaptureProtocol::Type::Error, {message.begin(), message.end()}));
+            return 1;
+        }
+    }
     if (mode == "error") {
         const std::string message = "test permission denied";
         sendBytes(CaptureProtocol::frame(CaptureProtocol::Type::Error,
@@ -75,14 +90,15 @@ int main(int argc, char** argv)
     if (mode != "idle") {
         const bool detailStream = mode == "detail-stream";
         const bool detailBudget = mode == "detail-budget";
-        const int count = mode == "flood" ? 2100 : detailStream ? 2102 : detailBudget ? 1050 : 1;
+        const bool pair = mode == "filter-pair";
+        const int count = mode == "flood" ? 2100 : detailStream ? 2102 : detailBudget ? 1050 : pair ? 2 : 1;
         for (int index = 0; index < count; ++index) {
             if ((detailStream || detailBudget) && (index == 2 || (index > 2 && index % 100 == 0))) {
                 pollfd input{STDIN_FILENO, POLLIN, 0};
                 if (poll(&input, 1, index == 2 ? 400 : 80) > 0) return 0;
             }
             std::vector<unsigned char> data{'t', 'e', 's', 't'};
-            if (mode == "parsed" || detailStream || detailBudget) {
+            if (mode == "parsed" || detailStream || detailBudget || pair) {
                 data.assign(detailBudget ? 65535 : 54, 0);
                 data[12] = 0x08;
                 data[14] = 0x45;
@@ -99,7 +115,7 @@ int main(int argc, char** argv)
                 if (detailStream || detailBudget) {
                     data[41] = static_cast<unsigned char>(index);
                 }
-                if (detailStream && index == 1) {
+                if ((detailStream || pair) && index == 1) {
                     data.resize(46);
                     data[17] = 32;
                     data[23] = 17;
@@ -117,10 +133,16 @@ int main(int argc, char** argv)
                     data[45] = 'Z';
                 }
             }
+            if (filter.program()) {
+                pcap_pkthdr header{};
+                header.caplen = data.size();
+                header.len = data.size();
+                if (pcap_offline_filter(filter.program(), &header, data.data()) == 0) continue;
+            }
             std::vector<unsigned char> payload;
             CaptureProtocol::append64(payload, 1700000000123456);
             CaptureProtocol::append32(payload, mode == "invalid-length" ? 5 : data.size());
-            CaptureProtocol::append32(payload, mode == "parsed" || detailStream || detailBudget ? data.size() : 8);
+            CaptureProtocol::append32(payload, mode == "parsed" || detailStream || detailBudget || pair ? data.size() : 8);
             payload.insert(payload.end(), data.begin(), data.end());
             if (!sendBytes(CaptureProtocol::frame(CaptureProtocol::Type::Packet, payload),
                            mode == "fragmented")) {

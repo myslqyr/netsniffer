@@ -9,6 +9,7 @@
 #include <QHeaderView>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QLineEdit>
 #include <QPushButton>
 #include <QStatusBar>
 #include <QSignalBlocker>
@@ -29,6 +30,7 @@ MainWindow::MainWindow(QString helperPath) : helperPath_(std::move(helperPath))
     auto* controls = new QHBoxLayout;
     controls->addWidget(new QLabel(QStringLiteral("捕获网卡："), central));
     deviceSelector_ = new QComboBox(central);
+    deviceSelector_->setObjectName(QStringLiteral("captureDevice"));
     controls->addWidget(deviceSelector_, 1);
     refresh_ = new QPushButton(QStringLiteral("刷新网卡"), central);
     controls->addWidget(refresh_);
@@ -38,6 +40,58 @@ MainWindow::MainWindow(QString helperPath) : helperPath_(std::move(helperPath))
     controls->addWidget(start_);
     controls->addWidget(stop_);
     layout->addLayout(controls);
+
+    auto* captureControls = new QHBoxLayout;
+    captureControls->addWidget(new QLabel(QStringLiteral("捕获过滤："), central));
+    captureFilter_ = new QLineEdit(central);
+    captureFilter_->setObjectName(QStringLiteral("captureFilter"));
+    captureFilter_->setMaxLength(4096);
+    captureControls->addWidget(captureFilter_, 1);
+    layout->addLayout(captureControls);
+
+    auto* displayControls = new QHBoxLayout;
+    displayControls->addWidget(new QLabel(QStringLiteral("显示过滤："), central));
+    protocolFilter_ = new QComboBox(central);
+    protocolFilter_->setObjectName(QStringLiteral("protocolFilter"));
+    protocolFilter_->addItem(QStringLiteral("全部协议"), QString());
+    for (const auto& protocol : {"TCP", "UDP", "IPv4", "IPv6", "ICMP", "ICMPv6", "ARP", "IGMP"}) {
+        protocolFilter_->addItem(QString::fromLatin1(protocol), QString::fromLatin1(protocol));
+    }
+    displayControls->addWidget(protocolFilter_);
+    displayControls->addWidget(new QLabel(QStringLiteral("IP 地址："), central));
+    addressFilter_ = new QLineEdit(central);
+    addressFilter_->setObjectName(QStringLiteral("addressFilter"));
+    addressFilter_->setMaxLength(64);
+    displayControls->addWidget(addressFilter_, 1);
+    displayControls->addWidget(new QLabel(QStringLiteral("端口："), central));
+    portFilter_ = new QLineEdit(central);
+    portFilter_->setObjectName(QStringLiteral("portFilter"));
+    portFilter_->setMaxLength(10);
+    portFilter_->setMaximumWidth(100);
+    displayControls->addWidget(portFilter_);
+    auto* apply = new QPushButton(QStringLiteral("应用"), central);
+    apply->setObjectName(QStringLiteral("applyDisplayFilter"));
+    auto* clear = new QPushButton(QStringLiteral("清除"), central);
+    clear->setObjectName(QStringLiteral("clearDisplayFilter"));
+    displayControls->addWidget(apply);
+    displayControls->addWidget(clear);
+    layout->addLayout(displayControls);
+    filterError_ = new QLabel(central);
+    filterError_->setObjectName(QStringLiteral("filterError"));
+    filterError_->setTextFormat(Qt::PlainText);
+    filterError_->hide();
+    layout->addWidget(filterError_);
+    connect(apply, &QPushButton::clicked, this, &MainWindow::applyDisplayFilter);
+    connect(addressFilter_, &QLineEdit::returnPressed, this, &MainWindow::applyDisplayFilter);
+    connect(portFilter_, &QLineEdit::returnPressed, this, &MainWindow::applyDisplayFilter);
+    connect(protocolFilter_, &QComboBox::currentIndexChanged, this, &MainWindow::applyDisplayFilter);
+    connect(clear, &QPushButton::clicked, this, [this] {
+        const QSignalBlocker blocker(protocolFilter_);
+        protocolFilter_->setCurrentIndex(0);
+        addressFilter_->clear();
+        portFilter_->clear();
+        applyDisplayFilter();
+    });
 
     details_ = new QLabel(central);
     details_->setTextFormat(Qt::PlainText);
@@ -83,6 +137,9 @@ MainWindow::MainWindow(QString helperPath) : helperPath_(std::move(helperPath))
     panes->setStretchFactor(2, 2);
     layout->addWidget(panes, 1);
     connect(table_, &QTableWidget::itemSelectionChanged, this, &MainWindow::showSelectedPacket);
+    connect(table_->model(), &QAbstractItemModel::layoutChanged, this, [this] {
+        if (!updatingPackets_) refreshDisplayFilter();
+    });
     connect(protocolTree_, &QTreeWidget::currentItemChanged, this, [this](QTreeWidgetItem* item) {
         bytesView_->highlightBytes(item && item->data(0, Qt::UserRole).isValid()
                                        ? item->data(0, Qt::UserRole).toLongLong() : -1,
@@ -142,16 +199,21 @@ void MainWindow::startCapture()
     storedBytes_ = 0;
     clearPacketDetails();
     packetCount_ = 0;
+    visiblePacketCount_ = 0;
+    lastDroppedPackets_ = 0;
+    captureReady_ = false;
     captureError_.clear();
-    worker_ = new CaptureWorker(deviceSelector_->currentData().toString(), this, helperPath_);
+    worker_ = new CaptureWorker(deviceSelector_->currentData().toString(), this, helperPath_, captureFilter_->text());
+    captureFilter_->setEnabled(false);
     deviceSelector_->setEnabled(false);
     refresh_->setEnabled(false);
     start_->setEnabled(false);
     stop_->setEnabled(true);
     statusBar()->showMessage(QStringLiteral("正在启动抓包…"));
     connect(worker_, &CaptureWorker::captureStarted, this, [this] {
+        captureReady_ = true;
         if (stop_->isEnabled()) {
-            statusBar()->showMessage(QStringLiteral("正在抓包"));
+            updateCaptureStatus();
         }
     });
     connect(worker_, &CaptureWorker::captureError, this, [this](const QString& error) {
@@ -163,15 +225,13 @@ void MainWindow::startCapture()
         timer_->stop();
         worker_->deleteLater();
         worker_ = nullptr;
+        captureReady_ = false;
+        captureFilter_->setEnabled(true);
         deviceSelector_->setEnabled(!devices_.isEmpty());
         refresh_->setEnabled(true);
         start_->setEnabled(!devices_.isEmpty());
         stop_->setEnabled(false);
-        if (!captureError_.isEmpty()) {
-            statusBar()->showMessage(QStringLiteral("抓包失败：") + captureError_);
-        } else {
-            statusBar()->showMessage(QStringLiteral("已停止，共接收 %1 个包").arg(packetCount_));
-        }
+        updateCaptureStatus();
         if (closing_) {
             close();
         }
@@ -195,7 +255,10 @@ void MainWindow::drainPackets()
         return;
     }
     const auto packets = worker_->takePackets();
+    lastDroppedPackets_ = worker_->droppedPackets();
+    if (packets.isEmpty()) return;
     const QSignalBlocker selectionBlocker(table_);
+    updatingPackets_ = true;
     table_->setUpdatesEnabled(false);
     const bool sorting = table_->isSortingEnabled();
     table_->setSortingEnabled(false);
@@ -222,7 +285,7 @@ void MainWindow::drainPackets()
         }
         auto* rowItem = table_->item(row, 0);
         rowItem->setData(Qt::UserRole, QVariant::fromValue(packetCount_));
-        packets_.insert(packetCount_, {packet, rowItem});
+        packets_.insert(packetCount_, {packet, rowItem, parsed});
         packetOrder_.push_back(packetCount_);
         storedBytes_ += packet.bytes.size();
         while (packetOrder_.size() > maxRows || storedBytes_ > maxBytes) {
@@ -239,13 +302,54 @@ void MainWindow::drainPackets()
         table_->setCurrentCell(-1, -1);
     }
     table_->setSortingEnabled(sorting);
+    updatingPackets_ = false;
     table_->setUpdatesEnabled(true);
     // Signals were blocked during insertion/eviction. Refresh once from stable IDs.
-    showSelectedPacket();
-    if (captureError_.isEmpty() && stop_->isEnabled()) {
-        statusBar()->showMessage(QStringLiteral("正在抓包 · 接收 %1 · 队列丢弃 %2 · 显示 %3")
-            .arg(packetCount_).arg(worker_->droppedPackets()).arg(table_->rowCount()));
+    refreshDisplayFilter();
+}
+
+void MainWindow::applyDisplayFilter()
+{
+    QString error;
+    auto next = DisplayFilter::create(protocolFilter_->currentData().toString(),
+                                      addressFilter_->text(), portFilter_->text(), error);
+    filterError_->setText(error);
+    filterError_->setVisible(!error.isEmpty());
+    if (!next) return;
+    displayFilter_ = std::move(*next);
+    refreshDisplayFilter();
+}
+
+void MainWindow::refreshDisplayFilter()
+{
+    const QSignalBlocker blocker(table_);
+    visiblePacketCount_ = 0;
+    for (int row = 0; row < table_->rowCount(); ++row) {
+        const auto id = table_->item(row, 0)->data(Qt::UserRole).toULongLong();
+        const auto stored = packets_.constFind(id);
+        const bool visible = stored != packets_.cend() && displayFilter_.matches(stored->parsed);
+        table_->setRowHidden(row, !visible);
+        if (visible) ++visiblePacketCount_;
     }
+    const auto selected = table_->selectedItems();
+    if (!selected.isEmpty() && table_->isRowHidden(selected.first()->row())) {
+        table_->clearSelection();
+        table_->setCurrentCell(-1, -1);
+    }
+    showSelectedPacket();
+    updateCaptureStatus();
+}
+
+void MainWindow::updateCaptureStatus()
+{
+    if (!captureError_.isEmpty()) {
+        statusBar()->showMessage(QStringLiteral("抓包失败：") + captureError_);
+        return;
+    }
+    const auto state = !worker_ ? QStringLiteral("已停止") : !stop_->isEnabled() ? QStringLiteral("正在停止…")
+        : captureReady_ ? QStringLiteral("正在抓包") : QStringLiteral("正在启动抓包…");
+    statusBar()->showMessage(QStringLiteral("%1 · 接收 %2 · 缓存 %3 · 显示 %4 · 队列丢弃 %5")
+        .arg(state).arg(packetCount_).arg(packets_.size()).arg(visiblePacketCount_).arg(lastDroppedPackets_));
 }
 
 void MainWindow::clearPacketDetails()

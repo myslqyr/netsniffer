@@ -11,10 +11,11 @@
 #include <unistd.h>
 
 static QString helperPath;
+static QString captureExpression;
 
 static bool checkSession(const QString& device, bool sendTraffic, bool expectError)
 {
-    CaptureWorker worker(device, nullptr, helperPath);
+    CaptureWorker worker(device, nullptr, helperPath, captureExpression);
     QEventLoop loop;
     bool started = false;
     bool error = false;
@@ -91,6 +92,10 @@ int main(int argc, char** argv)
     const int helperIndex = app.arguments().indexOf(QStringLiteral("--helper"));
     if (helperIndex >= 0 && helperIndex + 1 < app.arguments().size()) {
         helperPath = app.arguments().at(helperIndex + 1);
+    }
+    const int filterIndex = app.arguments().indexOf(QStringLiteral("--filter"));
+    if (filterIndex >= 0 && filterIndex + 1 < app.arguments().size()) {
+        captureExpression = app.arguments().at(filterIndex + 1);
     }
     if (app.arguments().contains(QStringLiteral("--expect-error"))) {
         return checkSession(QStringLiteral("netsniffer-nonexistent-device"), false, true) ? 0 : 1;

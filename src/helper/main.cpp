@@ -1,4 +1,5 @@
 #include "../capture/protocol.h"
+#include "../capture/capturefilter.h"
 
 #include <cerrno>
 #include <csignal>
@@ -74,7 +75,8 @@ bool dropCapabilities()
 
 int main(int argc, char** argv)
 {
-    if (argc != 3 || std::strcmp(argv[1], "--interface") != 0 || argv[2][0] == '\0') {
+    if ((argc != 3 && argc != 5) || std::strcmp(argv[1], "--interface") != 0 || argv[2][0] == '\0'
+        || (argc == 5 && std::strcmp(argv[3], "--filter") != 0)) {
         return 2;
     }
     const auto parent = getppid();
@@ -88,6 +90,8 @@ int main(int argc, char** argv)
     if (flags < 0 || fcntl(STDOUT_FILENO, F_SETFL, flags | O_NONBLOCK) < 0) {
         return 2;
     }
+    const std::string expression = argc == 5 ? argv[4] : "";
+    if (expression.size() > 4096) return fail("捕获过滤条件过长");
 
     char error[PCAP_ERRBUF_SIZE] = {};
     std::unique_ptr<pcap_t, decltype(&pcap_close)> handle(
@@ -110,6 +114,17 @@ int main(int argc, char** argv)
     // The packet socket is open; the running helper needs no retained capabilities.
     if (linkType < 0 || !dropCapabilities()) {
         return fail("Unable to finish capture initialization");
+    }
+    if (!expression.empty()) {
+        bpf_u_int32 network = 0;
+        bpf_u_int32 netmask = PCAP_NETMASK_UNKNOWN;
+        if (pcap_lookupnet(argv[2], &network, &netmask, error) != 0) netmask = PCAP_NETMASK_UNKNOWN;
+        CaptureFilter filter;
+        std::string filterError;
+        if (!filter.compile(handle.get(), expression, filterError, netmask)
+            || !filter.install(handle.get(), filterError)) {
+            return fail("捕获过滤条件错误：" + filterError);
+        }
     }
     std::vector<unsigned char> ready;
     CaptureProtocol::append32(ready, static_cast<std::uint32_t>(linkType));

@@ -8,10 +8,10 @@
 #include <limits>
 #include <utility>
 
-CaptureWorker::CaptureWorker(QString device, QObject* parent, QString helperPath)
+CaptureWorker::CaptureWorker(QString device, QObject* parent, QString helperPath, QString captureFilter)
     : QThread(parent), device_(std::move(device)),
       helperPath_(helperPath.isEmpty() ? QString::fromLatin1(CaptureProtocol::installedHelper)
-                                       : std::move(helperPath))
+                                       : std::move(helperPath)), captureFilter_(captureFilter.trimmed())
 {
 }
 
@@ -40,7 +40,15 @@ void CaptureWorker::run()
     }
     QProcess process;
     process.setProgram(helperPath_);
-    process.setArguments({QStringLiteral("--interface"), device_});
+    QStringList arguments{QStringLiteral("--interface"), device_};
+    if (!captureFilter_.isEmpty()) {
+        if (captureFilter_.toUtf8().size() > 4096 || captureFilter_.contains(QChar('\0'))) {
+            emit captureError(QStringLiteral("捕获过滤条件过长或包含无效字符"));
+            return;
+        }
+        arguments.append({QStringLiteral("--filter"), captureFilter_});
+    }
+    process.setArguments(arguments);
     process.start();
     if (!process.waitForStarted(3000)) {
         emit captureError(QStringLiteral("无法启动抓包辅助程序：") + process.errorString());
@@ -127,7 +135,8 @@ void CaptureWorker::run()
         }
         if (process.state() == QProcess::NotRunning && process.bytesAvailable() == 0) {
             if (!stopping.isValid()) {
-                fail(QStringLiteral("抓包辅助程序意外退出"));
+                fail(!ready && !captureFilter_.isEmpty() && process.exitCode() == 2
+                    ? QStringLiteral("抓包辅助程序需要更新") : QStringLiteral("抓包辅助程序意外退出"));
             }
             break;
         }

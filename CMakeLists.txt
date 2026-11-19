@@ -16,11 +16,16 @@ set_target_properties(netsniffer-capture PROPERTIES AUTOMOC OFF)
 target_link_libraries(netsniffer-capture PRIVATE PkgConfig::PCAP)
 target_compile_options(netsniffer-capture PRIVATE -Wall -Wextra -Wpedantic)
 
-add_library(packet_parser STATIC src/parser/packetparser.cpp src/filter/displayfilter.cpp)
+add_library(packet_parser STATIC src/parser/packetparser.cpp src/filter/displayfilter.cpp src/packet/packet.cpp)
 set_target_properties(packet_parser PROPERTIES AUTOMOC OFF)
 target_link_libraries(packet_parser PUBLIC Qt6::Core PRIVATE PkgConfig::PCAP)
 target_include_directories(packet_parser PUBLIC src)
 target_compile_options(packet_parser PRIVATE -Wall -Wextra -Wpedantic)
+
+add_library(pcap_storage STATIC src/storage/pcapfile.cpp src/storage/pcapfileworker.cpp)
+target_link_libraries(pcap_storage PUBLIC Qt6::Core PkgConfig::PCAP)
+target_include_directories(pcap_storage PUBLIC src)
+target_compile_options(pcap_storage PRIVATE -Wall -Wextra -Wpedantic)
 
 add_executable(netsniffer
     src/main.cpp
@@ -29,11 +34,23 @@ add_executable(netsniffer
     src/ui/mainwindow.cpp
     src/ui/packetbytesview.cpp
 )
-target_link_libraries(netsniffer PRIVATE Qt6::Widgets PkgConfig::PCAP packet_parser)
+target_link_libraries(netsniffer PRIVATE Qt6::Widgets PkgConfig::PCAP packet_parser pcap_storage)
 target_compile_options(netsniffer PRIVATE -Wall -Wextra -Wpedantic)
 
 include(CTest)
 if(BUILD_TESTING)
+    add_executable(pcapfile_check tests/pcapfile_check.cpp)
+    set_target_properties(pcapfile_check PROPERTIES AUTOMOC OFF)
+    target_link_libraries(pcapfile_check PRIVATE pcap_storage packet_parser)
+    target_compile_options(pcapfile_check PRIVATE -Wall -Wextra -Wpedantic)
+    add_test(NAME pcap_files COMMAND pcapfile_check)
+    add_executable(pcap_ui_check tests/pcap_ui_check.cpp
+        src/ui/mainwindow.cpp src/ui/packetbytesview.cpp src/capture/captureworker.cpp)
+    target_link_libraries(pcap_ui_check PRIVATE Qt6::Widgets packet_parser pcap_storage)
+    target_include_directories(pcap_ui_check PRIVATE src)
+    target_compile_options(pcap_ui_check PRIVATE -Wall -Wextra -Wpedantic)
+    add_test(NAME pcap_ui COMMAND pcap_ui_check $<TARGET_FILE:fake_capture_helper>)
+    set_tests_properties(pcap_ui PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 45)
     add_executable(filter_check tests/filter_check.cpp src/capture/capturefilter.cpp)
     set_target_properties(filter_check PROPERTIES AUTOMOC OFF)
     target_link_libraries(filter_check PRIVATE packet_parser PkgConfig::PCAP)
@@ -57,21 +74,21 @@ if(BUILD_TESTING)
     set_tests_properties(capture_ipc PROPERTIES TIMEOUT 30)
     add_executable(capture_ui_check tests/capture_ui_check.cpp
         src/ui/mainwindow.cpp src/ui/packetbytesview.cpp src/capture/captureworker.cpp)
-    target_link_libraries(capture_ui_check PRIVATE Qt6::Widgets packet_parser)
+    target_link_libraries(capture_ui_check PRIVATE Qt6::Widgets packet_parser pcap_storage)
     target_include_directories(capture_ui_check PRIVATE src)
     target_compile_options(capture_ui_check PRIVATE -Wall -Wextra -Wpedantic)
     add_test(NAME capture_ui COMMAND capture_ui_check $<TARGET_FILE:fake_capture_helper>)
     set_tests_properties(capture_ui PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 30)
     add_executable(packet_details_check tests/packet_details_check.cpp
         src/ui/mainwindow.cpp src/ui/packetbytesview.cpp src/capture/captureworker.cpp)
-    target_link_libraries(packet_details_check PRIVATE Qt6::Widgets packet_parser)
+    target_link_libraries(packet_details_check PRIVATE Qt6::Widgets packet_parser pcap_storage)
     target_include_directories(packet_details_check PRIVATE src)
     target_compile_options(packet_details_check PRIVATE -Wall -Wextra -Wpedantic)
     add_test(NAME packet_details COMMAND packet_details_check $<TARGET_FILE:fake_capture_helper>)
     set_tests_properties(packet_details PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 45)
     add_executable(filter_ui_check tests/filter_ui_check.cpp
         src/ui/mainwindow.cpp src/ui/packetbytesview.cpp src/capture/captureworker.cpp)
-    target_link_libraries(filter_ui_check PRIVATE Qt6::Widgets packet_parser)
+    target_link_libraries(filter_ui_check PRIVATE Qt6::Widgets packet_parser pcap_storage)
     target_include_directories(filter_ui_check PRIVATE src)
     target_compile_options(filter_ui_check PRIVATE -Wall -Wextra -Wpedantic)
     add_test(NAME filter_ui COMMAND filter_ui_check $<TARGET_FILE:fake_capture_helper>)

@@ -19,10 +19,13 @@ class QTreeWidget;
 class QTableWidgetItem;
 class PacketBytesView;
 class QLineEdit;
+class PcapFileWorker;
 
 class MainWindow : public QMainWindow {
 public:
     explicit MainWindow(QString helperPath = {});
+    bool openPcapFile(const QString& path);
+    bool savePcapFile(const QString& path);
 
 private:
     void refreshDevices();
@@ -35,6 +38,10 @@ private:
     void applyDisplayFilter();
     void refreshDisplayFilter();
     void updateCaptureStatus();
+    void appendPackets(const QVector<CapturedPacket>& packets);
+    void resetPackets();
+    void startFileOperation(PcapFileWorker* operation);
+    void setFileBusy(bool busy);
     void closeEvent(QCloseEvent* event) override;
 
     QVector<CaptureDevice> devices_;
@@ -72,4 +79,12 @@ private:
     quint64 lastDroppedPackets_ = 0;
     bool updatingPackets_ = false;
     bool captureReady_ = false;
+    QPushButton* openFile_;
+    QPushButton* saveFile_;
+    QPushButton* cancelFile_;
+    PcapFileWorker* fileWorker_ = nullptr;
+    quint64 fileProgress_ = 0;
+    QString sourcePath_;
+    QString fileError_;
+    QString fileNotice_;
 };

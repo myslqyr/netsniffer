@@ -1,7 +1,6 @@
 #include "packetparser.h"
 
 #include <algorithm>
-#include <QDateTime>
 #include <arpa/inet.h>
 #include <cstring>
 #include <pcap/dlt.h>
@@ -15,9 +14,7 @@ public:
           includeDetails_(includeDetails)
     {
         group(QStringLiteral("帧"), 0, end_);
-        field(QStringLiteral("捕获时间"),
-              QDateTime::fromMSecsSinceEpoch(packet.timestampUs / 1000).toString(QStringLiteral("yyyy-MM-dd HH:mm:ss"))
-                  + QStringLiteral(".%1").arg(packet.timestampUs % 1000000, 6, 10, QLatin1Char('0')));
+        field(QStringLiteral("捕获时间"), packetTimestamp(packet, true));
         field(QStringLiteral("捕获长度"), QStringLiteral("%1 字节").arg(packet.capturedLength));
         field(QStringLiteral("原始长度"), QStringLiteral("%1 字节").arg(packet.originalLength));
         field(QStringLiteral("链路类型"), QString::number(packet.linkType));

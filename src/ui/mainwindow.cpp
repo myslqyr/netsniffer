@@ -2,10 +2,12 @@
 #include "../capture/captureworker.h"
 #include "../parser/packetparser.h"
 #include "packetbytesview.h"
+#include "../storage/pcapfileworker.h"
 
 #include <QCloseEvent>
 #include <QComboBox>
-#include <QDateTime>
+#include <QFileDialog>
+#include <QFileInfo>
 #include <QHeaderView>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -39,7 +41,40 @@ MainWindow::MainWindow(QString helperPath) : helperPath_(std::move(helperPath))
     stop_->setEnabled(false);
     controls->addWidget(start_);
     controls->addWidget(stop_);
+    openFile_ = new QPushButton(QStringLiteral("打开 PCAP"), central);
+    openFile_->setObjectName(QStringLiteral("openPcap"));
+    saveFile_ = new QPushButton(QStringLiteral("保存缓存"), central);
+    saveFile_->setObjectName(QStringLiteral("savePcap"));
+    saveFile_->setEnabled(false);
+    cancelFile_ = new QPushButton(QStringLiteral("取消读写"), central);
+    cancelFile_->setObjectName(QStringLiteral("cancelFileOperation"));
+    cancelFile_->hide();
+    controls->addWidget(openFile_);
+    controls->addWidget(saveFile_);
+    controls->addWidget(cancelFile_);
     layout->addLayout(controls);
+    connect(openFile_, &QPushButton::clicked, this, [this] {
+        const auto path = QFileDialog::getOpenFileName(this, QStringLiteral("打开 PCAP 文件"), {},
+                                                      QStringLiteral("PCAP 文件 (*.pcap *.cap);;所有文件 (*)"));
+        if (!path.isEmpty()) openPcapFile(path);
+    });
+    connect(saveFile_, &QPushButton::clicked, this, [this] {
+        QFileDialog dialog(this, QStringLiteral("保存缓存为 PCAP"));
+        dialog.setAcceptMode(QFileDialog::AcceptSave);
+        dialog.setFileMode(QFileDialog::AnyFile);
+        dialog.setNameFilter(QStringLiteral("PCAP 文件 (*.pcap)"));
+        dialog.setDefaultSuffix(QStringLiteral("pcap"));
+        dialog.selectFile(QStringLiteral("capture.pcap"));
+        if (dialog.exec() == QDialog::Accepted && !dialog.selectedFiles().isEmpty()) {
+            savePcapFile(dialog.selectedFiles().first());
+        }
+    });
+    connect(cancelFile_, &QPushButton::clicked, this, [this] {
+        if (fileWorker_) {
+            fileWorker_->requestInterruption();
+            cancelFile_->setEnabled(false);
+        }
+    });
 
     auto* captureControls = new QHBoxLayout;
     captureControls->addWidget(new QLabel(QStringLiteral("捕获过滤："), central));
@@ -190,20 +225,17 @@ void MainWindow::refreshDevices()
 
 void MainWindow::startCapture()
 {
-    if (worker_ || deviceSelector_->currentIndex() < 0) {
+    if (worker_ || fileWorker_ || deviceSelector_->currentIndex() < 0) {
         return;
     }
-    table_->setRowCount(0);
-    packets_.clear();
-    packetOrder_.clear();
-    storedBytes_ = 0;
-    clearPacketDetails();
-    packetCount_ = 0;
-    visiblePacketCount_ = 0;
-    lastDroppedPackets_ = 0;
-    captureReady_ = false;
-    captureError_.clear();
+    sourcePath_.clear();
+    fileError_.clear();
+    fileNotice_.clear();
+    resetPackets();
+    showSelectedDevice();
     worker_ = new CaptureWorker(deviceSelector_->currentData().toString(), this, helperPath_, captureFilter_->text());
+    openFile_->setEnabled(false);
+    saveFile_->setEnabled(false);
     captureFilter_->setEnabled(false);
     deviceSelector_->setEnabled(false);
     refresh_->setEnabled(false);
@@ -231,6 +263,8 @@ void MainWindow::startCapture()
         refresh_->setEnabled(true);
         start_->setEnabled(!devices_.isEmpty());
         stop_->setEnabled(false);
+        openFile_->setEnabled(true);
+        saveFile_->setEnabled(!packets_.isEmpty());
         updateCaptureStatus();
         if (closing_) {
             close();
@@ -238,6 +272,21 @@ void MainWindow::startCapture()
     });
     timer_->start();
     worker_->start();
+}
+
+void MainWindow::resetPackets()
+{
+    const QSignalBlocker blocker(table_);
+    table_->setRowCount(0);
+    packets_.clear();
+    packetOrder_.clear();
+    storedBytes_ = 0;
+    clearPacketDetails();
+    packetCount_ = 0;
+    visiblePacketCount_ = 0;
+    lastDroppedPackets_ = 0;
+    captureReady_ = false;
+    captureError_.clear();
 }
 
 void MainWindow::stopCapture()
@@ -257,20 +306,23 @@ void MainWindow::drainPackets()
     const auto packets = worker_->takePackets();
     lastDroppedPackets_ = worker_->droppedPackets();
     if (packets.isEmpty()) return;
+    appendPackets(packets);
+}
+
+void MainWindow::appendPackets(const QVector<CapturedPacket>& packets)
+{
     const QSignalBlocker selectionBlocker(table_);
     updatingPackets_ = true;
     table_->setUpdatesEnabled(false);
     const bool sorting = table_->isSortingEnabled();
     table_->setSortingEnabled(false);
     // IDs stay stable when rows move; retain at most 2000 packets / 64 MiB of bytes.
-    constexpr int maxRows = 2000;
-    constexpr qsizetype maxBytes = 64 * 1024 * 1024;
+    constexpr auto maxRows = PcapFile::maxCachedPackets;
+    constexpr auto maxBytes = PcapFile::maxCachedBytes;
     for (const auto& packet : packets) {
         const int row = table_->rowCount();
         table_->insertRow(row);
-        const auto time = QDateTime::fromMSecsSinceEpoch(packet.timestampUs / 1000)
-            .toString(QStringLiteral("HH:mm:ss"))
-            + QStringLiteral(".%1").arg(packet.timestampUs % 1000000, 6, 10, QLatin1Char('0'));
+        const auto time = packetTimestamp(packet);
         const auto parsed = parsePacket(packet);
         const QStringList values{QString::number(++packetCount_), time,
                                  parsed.source.isEmpty() ? QStringLiteral("—") : parsed.source,
@@ -288,7 +340,7 @@ void MainWindow::drainPackets()
         packets_.insert(packetCount_, {packet, rowItem, parsed});
         packetOrder_.push_back(packetCount_);
         storedBytes_ += packet.bytes.size();
-        while (packetOrder_.size() > maxRows || storedBytes_ > maxBytes) {
+        while (packetOrder_.size() > std::size_t(maxRows) || storedBytes_ > maxBytes) {
             const auto id = packetOrder_.front();
             packetOrder_.pop_front();
             const auto oldest = packets_.find(id);
@@ -342,14 +394,97 @@ void MainWindow::refreshDisplayFilter()
 
 void MainWindow::updateCaptureStatus()
 {
+    if (fileWorker_) {
+        statusBar()->showMessage(QStringLiteral("%1 %2 · 已处理 %3 个包")
+            .arg(fileWorker_->operation() == PcapFileWorker::Operation::Read ? QStringLiteral("正在读取") : QStringLiteral("正在保存"),
+                 QFileInfo(fileWorker_->path()).fileName()).arg(fileProgress_));
+        return;
+    }
+    if (!fileError_.isEmpty()) {
+        statusBar()->showMessage(fileError_);
+        return;
+    }
     if (!captureError_.isEmpty()) {
         statusBar()->showMessage(QStringLiteral("抓包失败：") + captureError_);
         return;
     }
-    const auto state = !worker_ ? QStringLiteral("已停止") : !stop_->isEnabled() ? QStringLiteral("正在停止…")
+    const auto state = !worker_ ? (sourcePath_.isEmpty() ? QStringLiteral("已停止")
+        : QStringLiteral("文件：") + QFileInfo(sourcePath_).fileName()) : !stop_->isEnabled() ? QStringLiteral("正在停止…")
         : captureReady_ ? QStringLiteral("正在抓包") : QStringLiteral("正在启动抓包…");
-    statusBar()->showMessage(QStringLiteral("%1 · 接收 %2 · 缓存 %3 · 显示 %4 · 队列丢弃 %5")
-        .arg(state).arg(packetCount_).arg(packets_.size()).arg(visiblePacketCount_).arg(lastDroppedPackets_));
+    statusBar()->showMessage(QStringLiteral("%1 · %2 %3 · 缓存 %4 · 显示 %5 · 队列丢弃 %6%7")
+        .arg(state, sourcePath_.isEmpty() ? QStringLiteral("接收") : QStringLiteral("已读取"))
+        .arg(packetCount_).arg(packets_.size()).arg(visiblePacketCount_).arg(lastDroppedPackets_)
+        .arg(fileNotice_.isEmpty() ? QString() : QStringLiteral(" · ") + fileNotice_));
+}
+
+bool MainWindow::openPcapFile(const QString& path)
+{
+    if (worker_ || fileWorker_ || path.isEmpty()) return false;
+    startFileOperation(new PcapFileWorker(PcapFileWorker::Operation::Read, QFileInfo(path).absoluteFilePath(), {}, this));
+    return true;
+}
+
+bool MainWindow::savePcapFile(const QString& path)
+{
+    if (worker_ || fileWorker_ || path.isEmpty() || packets_.isEmpty()) return false;
+    QVector<CapturedPacket> snapshot;
+    snapshot.reserve(packetOrder_.size());
+    for (const auto id : packetOrder_) snapshot.append(packets_.constFind(id)->packet);
+    startFileOperation(new PcapFileWorker(PcapFileWorker::Operation::Write,
+                                        QFileInfo(path).absoluteFilePath(), std::move(snapshot), this));
+    return true;
+}
+
+void MainWindow::setFileBusy(bool busy)
+{
+    openFile_->setEnabled(!busy);
+    saveFile_->setEnabled(!busy && !packets_.isEmpty());
+    start_->setEnabled(!busy && !devices_.isEmpty());
+    refresh_->setEnabled(!busy);
+    deviceSelector_->setEnabled(!busy && !devices_.isEmpty());
+    captureFilter_->setEnabled(!busy);
+    cancelFile_->setVisible(busy);
+    cancelFile_->setEnabled(busy);
+}
+
+void MainWindow::startFileOperation(PcapFileWorker* operation)
+{
+    fileWorker_ = operation;
+    fileProgress_ = 0;
+    captureError_.clear();
+    fileError_.clear();
+    fileNotice_.clear();
+    setFileBusy(true);
+    updateCaptureStatus();
+    connect(operation, &PcapFileWorker::progress, this, [this](quint64 count) {
+        fileProgress_ = count;
+        updateCaptureStatus();
+    });
+    connect(operation, &QThread::finished, this, [this, operation] {
+        const auto result = operation->result();
+        const auto action = operation->operation();
+        const auto path = operation->path();
+        fileWorker_ = nullptr;
+        operation->deleteLater();
+        if (result.cancelled) {
+            fileNotice_ = action == PcapFileWorker::Operation::Read ? QStringLiteral("已取消读取") : QStringLiteral("已取消保存");
+        } else if (!result.error.isEmpty()) {
+            fileError_ = (action == PcapFileWorker::Operation::Read ? QStringLiteral("读取失败：") : QStringLiteral("保存失败："))
+                + result.error;
+        } else if (action == PcapFileWorker::Operation::Read) {
+            resetPackets();
+            sourcePath_ = path;
+            packetCount_ = result.packetCount - quint64(result.packets.size());
+            appendPackets(result.packets);
+            showSelectedDevice();
+        } else {
+            fileNotice_ = QStringLiteral("已保存 %1（%2 个包）").arg(QFileInfo(path).fileName()).arg(result.packetCount);
+        }
+        setFileBusy(false);
+        updateCaptureStatus();
+        if (closing_) close();
+    });
+    operation->start();
 }
 
 void MainWindow::clearPacketDetails()
@@ -395,10 +530,11 @@ void MainWindow::showSelectedPacket()
 
 void MainWindow::closeEvent(QCloseEvent* event)
 {
-    if (worker_) {
+    if (worker_ || fileWorker_) {
         closing_ = true;
         event->ignore();
         stopCapture();
+        if (fileWorker_) fileWorker_->requestInterruption();
         return;
     }
     QMainWindow::closeEvent(event);
@@ -406,6 +542,11 @@ void MainWindow::closeEvent(QCloseEvent* event)
 
 void MainWindow::showSelectedDevice()
 {
+    if (!sourcePath_.isEmpty() && !worker_) {
+        details_->setText(QStringLiteral("文件：%1\n已读取：%2 个包；当前缓存：%3 个包")
+            .arg(sourcePath_).arg(packetCount_).arg(packets_.size()));
+        return;
+    }
     const int index = deviceSelector_->currentIndex();
     if (index < 0 || index >= devices_.size()) {
         details_->setText(QStringLiteral("没有可用的捕获设备，请检查网络环境后刷新。"));
